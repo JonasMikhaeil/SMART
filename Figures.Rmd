@@ -1,0 +1,721 @@
+---
+title: "SMART"
+author: "Jonas Mikhaeil"
+date: "2025-04-29"
+output: html_document
+---
+
+```{r}
+library(dplyr)
+library(tidyverse)
+library(fastDummies)
+library(cmdstanr)
+options(mc.cores = parallel::detectCores())
+```
+
+### Method
+
+
+```{r,warning=FALSE,message=FALSE}
+
+get_collective_posterior_sequence <- function(data,prior_kappa,prior_mu){
+  collective_posterior <- NULL
+  LRE <- cmdstan_model("SMART.stan")
+
+  num_methods <- length(levels(as.factor(data$method)))
+  seq_length <- length(levels(as.factor(data$t)))
+  for(i in 1:seq_length){
+data_i <- data %>%filter(t<=i)
+X <- data_i %>%
+  select(tail(everything(), num_methods))
+fit_LRE <- LRE$sample(
+#data = list(N=length(data_i$y),m=num_methods,y=data_i$y,sigma_hat=data_i$se,label=X,sig_m=prior_kappa[i,],prior_mu = prior_mu[1],prior_sd = prior_mu[2]),
+ data = list(
+        N = length(data_i$y),
+        m = num_methods,
+        y = data_i$y,
+        sigma_hat = data_i$se,
+        label = X,
+        sig_m = prior[i, ]
+      ),
+seed = 123,
+chains = 4,
+parallel_chains = 4,
+refresh = 0,iter_sampling = 10000,show_messages  = FALSE,
+ show_exceptions= FALSE)
+
+draws_LRE <- fit_LRE$draws(
+  variables = "mu",
+  inc_warmup = FALSE)
+if(summary(draws_LRE)["rhat"]>1.1)
+  print(summary(draws_LRE))
+collective_posterior <- rbind(collective_posterior,data.frame(mu = posterior::as_draws_matrix(draws_LRE), seq = i))
+}
+ collective_posterior
+}
+get_collective_posterior_multiEstimate_sequence <- function(data,prior_kappa,prior_mu){
+  ### Slightly modified version of SMART to account for studies that report multiple estimates
+  ### This is useful for our minimum wage example.
+ collective_posterior <- NULL
+LRE <- cmdstan_model("SMART_MW.stan")
+num_methods <- length(levels(as.factor(data$method)))
+num_studies <- max(data$studyno)
+
+seq_length <- length(levels(as.factor(data$t)))
+for(i in 1:seq_length){
+data_i <- data %>%filter(t<=i)
+num_studies <- max(data_i$studyno)
+
+X <- data_i %>%
+  select(tail(everything(), num_methods))
+fit_LRE <- LRE$sample(
+data = list(N=length(data_i$y),m=num_methods,y=data_i$y,m2=num_studies,sigma_hat=data_i$se,label=X,sig_m=prior_kappa[i,],prior_mu = prior_mu[1],prior_sd = prior_mu[2],study_no=data_i$studyno),
+seed = 123,
+chains = 4,
+parallel_chains = 4,
+refresh = 0,iter_sampling = 20000,show_messages  = FALSE,
+show_exceptions= FALSE)
+
+draws_LRE <- fit_LRE$draws(
+  variables = "mu",
+  inc_warmup = FALSE)
+if(summary(draws_LRE)["rhat"]>1.1)
+  print(summary(draws_LRE))
+collective_posterior <- rbind(collective_posterior,data.frame(mu = posterior::as_draws_matrix(draws_LRE), seq = i))
+}
+ collective_posterior
+}
+calculate_W2_sequence <- function(collective_posterior,prior_mu=NULL){
+  W2_seq <- NULL
+  for(i in 1:length(unique(collective_posterior$seq))){
+  p1 <- collective_posterior$mu[collective_posterior$seq==i]
+  dist1<-hist(p1,plot = FALSE,breaks=seq(-15,15,4/1000))$density
+  if(i==1){
+    if(is.null(prior_mu)){
+    p0 <- runif(100000,-2,2)
+    dist0<-hist(p0,plot = FALSE,breaks=seq(-15,15,4/1000))$density
+    }
+    else{
+    p0 <- rnorm(100000,prior_mu[1],prior_mu[2])
+    dist0<-hist(p0,plot = FALSE,breaks=seq(-15,15,4/1000))$density
+    }
+  }
+  else{
+  p0 <- collective_posterior$mu[collective_posterior$seq==(i-1)]
+  dist0<-hist(p0,plot = FALSE,breaks=seq(-15,15,4/1000))$density
+  }
+  w2 <- data.frame(w2=transport::wasserstein1d(p1,p0,p=2),seq=i)
+  W2_seq <- rbind(W2_seq,w2)
+  }
+  W2_seq
+}
+
+calculate_posterior_estimates <- function(collective_posterior){
+  posterior_est_seq <- NULL
+ for(i in 1:length(unique(collective_posterior$seq))){
+   mu<- mean(collective_posterior$mu[collective_posterior$seq==i])
+    low<-  rstanarm::posterior_interval(matrix(collective_posterior$mu[collective_posterior$seq==i]))[1]
+    up<- rstanarm::posterior_interval(matrix(collective_posterior$mu[collective_posterior$seq==i]))[2]
+    posterior_est_seq <- rbind(posterior_est_seq,c(mu=mu,low=low,up=up))
+ }
+  data.frame(posterior_est_seq)
+}
+
+SMART <- function(data,prior){
+   ### data: y,se,t, method , X
+ ### prior: matrix t,method 0 or 1 (kappa_{method,t})
+collective_posterior <- get_collective_posterior_sequence(data,prior)
+W2_seq <- calculate_W2_sequence(collective_posterior)
+estm_seq <- calculate_posterior_estimates(collective_posterior)
+W2_seq
+}
+
+plot_data <- function(data) {
+  ### creates a data plot
+  ggplot(data) +
+    geom_point(aes(y = y, x = t), size = 0.5) +
+    geom_errorbar(aes(
+      x = t,
+      ymin = y - 1.96 * se,
+      ymax = y + 1.96 * se
+    ), width = 0) +
+    theme(
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.background = element_blank(),
+      axis.line = element_line(colour = "black")
+    ) +
+    xlab("Sequence of Experiments") +
+    ylab("Experiment Outcome y")
+}
+
+
+plot_W2_seq <- function(W2_seq){
+  ggplot(W2_seq%>%filter(seq>0))+
+  geom_line(aes(x=seq,y=w2))+
+  geom_point(aes(x=seq,y=w2))  +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black"))+
+ #geom_vline(xintercept = 11,color="dodgerblue4")+
+  xlab("Sequence of Studies")+
+   ylab("Sequential \n Research Contribution")
+}
+
+
+sensitivity_analysis<-function(data,lower=1e-4,upper=1){
+  kappa_seq <- c(1e-4,0.2,1)
+  W2_sensitivity <- NULL 
+for(kappa in kappa_seq){
+  print(kappa)
+  s <- lower
+  prior <- rbind(
+  matrix(c(s, s), nrow = 10, ncol = 2, byrow = TRUE),
+  matrix(c(kappa,     s), nrow = 20, ncol = 2, byrow = TRUE))
+  W2_seq_sim <- SMART(data,prior) 
+  W2_sensitivity <- rbind(W2_sensitivity,data.frame(w2 = W2_seq_sim, kappa = kappa))
+  #print(plot_W2_seq(W2_seq_sim))
+}
+  W2_sensitivity
+  }
+```
+
+### manyLabs
+
+```{r}
+many_labs <- read.csv("data/many_labs_dataset.csv")
+
+data <- many_labs %>% group_by(referrer) %>% summarize(y = ate[1],se = se[1])
+data$t <- 1:length(data$referrer)
+data$method <- 1
+#pdf("ML_progress_outcomes.pdf",5,4)
+plot1 <- ggplot(data)+
+  #geom_vline(xintercept = 11,color="dodgerblue4",alpha=0.6)+
+ #geom_vline(xintercept = 31,color="dodgerblue4",alpha=0.6)+
+  geom_point(aes(y=y,x=t),size=0.5) +
+  geom_errorbar(aes(x = t,ymin = y - 1.96*se,ymax = y + 1.96*se),width=0) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black"))+
+  xlab("Sequence of Experiments")+
+  ylab("Experiment Outcome y")
+
+
+```
+```{r}
+many_labs <- read.csv("data/many_labs_dataset.csv")
+
+data <- many_labs %>% group_by(referrer) %>% summarize(y = ate[1],se = se[1])
+data$t <- 1:length(data$referrer)
+data$method <- 1
+prior<-matrix(rep(1e-4,length(data$t)))
+collective_posterior <- get_collective_posterior_sequence(data,prior)
+```
+
+```{r}
+estm <- calculate_posterior_estimates(collective_posterior)
+estm$t <- 1:length(estm$mu)
+plot3<- ggplot(estm, aes(x=t,y=mu))+
+    geom_line()+
+    geom_ribbon(aes(ymin=low,ymax=up),alpha=0.3,fill="steelblue")+ 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black"))+
+  xlab("Sequence of Experiments")+
+   ylab("Posterior")+scale_x_continuous(limits = c(0,36), expand = c(-0.027, 0))+
+  scale_y_continuous(limits = c(-3,3))
+```
+
+```{r}
+
+W2_seq <- calculate_W2_sequence(collective_posterior)
+plot5 <-ggplot(W2_seq%>%filter(seq>0))+
+  geom_line(aes(x=seq,y=w2))+
+  geom_point(aes(x=seq,y=w2),size=0.5)  +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black"))+
+  scale_x_continuous(limits = c(0,36), expand = c(-0.027, 0))+
+  xlab("Sequence of Experiments")+
+  ylab("Sequential \n Research Contribution")
+```
+
+
+```{r}
+#pdf("ManyLabs.pdf",9,3)
+gridExtra::grid.arrange(plot1,plot3,plot5,nrow=1)
+```
+
+### Stylized Example
+
+```{r}
+create_data_cor <- function(n,n_per_study){
+theta <- 1
+beta <- 1
+gamma<- .1
+
+eps <- rnorm(n,0,0.1)
+
+#l <- rep(c(1+rnorm(n/3,0,0.1),-0.5+rnorm(2*n/3,0,0.1),-0.15+rnorm(2*n/6,0,0.1)),n_per_study)
+#l <- rep(c(rep(1,n/3),rep(-0.25,2*n/3)),n_per_study)
+l <- rep(c(rep(1,n/3),rep(0,2*n/3)),n_per_study)
+
+#l <- rnorm(n,0,3)
+z <- l*beta + rep(eps,n_per_study)
+
+y <- theta +z+rnorm(n*n_per_study,0,0.1)
+
+lab_no <- rep(1:n,n_per_study)
+sim <- data.frame(y = y, l = l ,lab_no = lab_no,method = c(rep(0,n/3),rep(1,2*n/3)))
+
+}
+
+create_data_iid <- function(n,n_per_study){
+theta <- 1
+beta <- 0
+gamma<- .1
+
+eps <- rnorm(n,0,0.1)
+
+y <- theta +rnorm(n*n_per_study,0,0.1)
+
+lab_no <- rep(1:n,n_per_study)
+sim <- data.frame(y = y ,lab_no = lab_no)
+
+}
+```
+
+```{r}
+set.seed(12345)
+n <- 30
+sim <- create_data_cor(n,50)
+meta_sim <- sim %>% group_by(lab_no) %>% summarize(es = mean(y),var = var(y),method=method[1])
+```
+
+
+```{r}
+#pdf("disc_progress_outcomes.pdf",5,4)
+plot1<-ggplot(meta_sim)+
+  geom_vline(xintercept = 11,color="dodgerblue4",alpha=0.6,size=0.9)+
+  geom_hline(yintercept = 1,color="orange",alpha=1,linetype="dashed",size=0.9)+
+annotate(geom="text", x=5, y=1.1, label="True Effect",color="orange",size=4)+
+  annotate(geom="text", x=20, y=1.8, label="Change of Methodology",color="dodgerblue4",size=4)+
+# geom_vline(xintercept = 51,color="dodgerblue4",alpha=0.6)+
+  geom_point(aes(y=es,x=lab_no),size=0.5) +
+  geom_errorbar(aes(x = lab_no,ymin = es - 1.96*sqrt(var),ymax = es + 1.96*sqrt(var)),width=0) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black"))+
+  xlab("Sequence of Experiments")+
+  ylab("Experiment Outcome y")
+```
+
+```{r}
+data <- meta_sim %>% mutate(t=lab_no,y=es,se=sqrt(var))
+kappa <- 1
+s <- 1e-4
+prior <- rbind(
+matrix(c(kappa, s), nrow = 10, ncol = 2, byrow = TRUE),
+matrix(c(kappa,     s), nrow = 20, ncol = 2, byrow = TRUE))
+
+meta_sim <- fastDummies::dummy_cols(
+  meta_sim,
+  select_columns = "method",
+  remove_first_dummy = FALSE,  # keep all m dummies
+  remove_selected_columns = FALSE
+)
+data <- meta_sim %>% mutate(var = sqrt(var)) %>% rename( y = es, t = lab_no, se = var)
+collective_posterior <- get_collective_posterior_sequence(data,prior)
+
+```
+```{r}
+estm <- calculate_posterior_estimates(collective_posterior)
+
+estm$t <- 1:length(estm$mu)
+ plot2<-ggplot(estm, aes(x=t,y=mu))+
+     geom_vline(xintercept = 11,color="dodgerblue4",alpha=0.6,size=0.9)+
+  geom_hline(yintercept = 1,color="orange",alpha=1,linetype="dashed",size=0.9)+
+    geom_line()+
+    geom_ribbon(aes(ymin=low,ymax=up),alpha=0.3,fill="steelblue")+ 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black"))+
+  xlab("Sequence of Experiments")+
+   ylab("Posterior")+
+ scale_x_continuous(limits = c(-0,30), expand = c(-0.04, 0))+
+  scale_y_continuous(limits = c(-2.3,4.5))
+```
+
+```{r}
+W2_seq <- calculate_W2_sequence(collective_posterior)
+plot3<-ggplot(W2_seq%>%filter(seq>0))+
+     geom_vline(xintercept = 11,color="dodgerblue4",alpha=0.6,size=0.9)+
+  geom_line(aes(x=seq,y=w2))+
+  geom_point(aes(x=seq,y=w2),size=0.5)  +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black"))+
+  scale_x_continuous(limits = c(0,30), expand = c(-0.027, 0))+
+    scale_y_continuous(limits = c(-0,1.7),expand = c(0.01, 0))+
+  xlab("Sequence of Experiments")+
+    ylab("Sequential \n Research Contribution")
+```
+
+```{r}
+#pdf("SynExmp.pdf",9,3)
+gridExtra::grid.arrange(plot1,plot2,plot3,nrow=1)
+```
+
+```{r,warning=FALSE,message=FALSE}
+kappa <- 1
+s <- 1e-4
+prior <- rbind(
+  matrix(c(s, s), nrow = 10, ncol = 2, byrow = TRUE),
+  matrix(c(kappa,     s), nrow = 20, ncol = 2, byrow = TRUE)
+)
+
+collective_posterior1 <- get_collective_posterior_sequence(data,prior)
+
+kappa <- 0.2
+s <- 1e-4
+prior <- rbind(
+  matrix(c(s, s), nrow = 10, ncol = 2, byrow = TRUE),
+  matrix(c(kappa,     s), nrow = 20, ncol = 2, byrow = TRUE)
+)
+
+collective_posterior02 <- get_collective_posterior_sequence(data,prior)
+
+kappa <- 1e-4
+s <- 1e-4
+prior <- rbind(
+  matrix(c(s, s), nrow = 10, ncol = 2, byrow = TRUE),
+  matrix(c(kappa,     s), nrow = 20, ncol = 2, byrow = TRUE)
+)
+
+collective_posterior4 <- get_collective_posterior_sequence(data,prior)
+
+```
+
+```{r}
+estm1 <- calculate_posterior_estimates(collective_posterior1)
+
+estm1$t <- 1:length(estm1$mu)
+plot1<-ggplot(estm1, aes(x=t,y=mu))+
+     geom_vline(xintercept = 11,color="dodgerblue4",alpha=0.6,size=0.9)+
+  geom_hline(yintercept = 1,color="orange",alpha=1,linetype="dashed",size=0.9)+
+  annotate(geom="text", x=20, y=2.5, label="kappa[1] == 1",color="orange",size=4)+
+    geom_line()+
+    geom_ribbon(aes(ymin=low,ymax=up),alpha=0.3,fill="steelblue")+ 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black"))+
+  xlab("Sequence of Experiments")+
+   ylab("Posterior")+
+ scale_x_continuous(limits = c(-0,30), expand = c(-0.04, 0))+
+  scale_y_continuous(limits = c(-2.3,4.5))
+```
+
+```{r}
+estm02 <- calculate_posterior_estimates(collective_posterior02)
+
+estm02$t <- 1:length(estm02$mu)
+plot2 <- ggplot(estm02, aes(x=t,y=mu))+
+     geom_vline(xintercept = 11,color="dodgerblue4",alpha=0.6,size=0.9)+
+  geom_hline(yintercept = 1,color="orange",alpha=1,linetype="dashed",size=0.9)+
+    annotate(geom="text", x=20, y=2.5, label="kappa[1] == 0.2",color="orange",size=4)+
+    geom_line()+
+    geom_ribbon(aes(ymin=low,ymax=up),alpha=0.3,fill="steelblue")+ 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black"),axis.title.y=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank())+
+  xlab("Sequence of Experiments")+
+   ylab("Posterior")+
+ scale_x_continuous(limits = c(-0,30), expand = c(-0.04, 0))+
+  scale_y_continuous(limits = c(-2.3,4.5))
+```
+
+```{r}
+estm4 <- calculate_posterior_estimates(collective_posterior4)
+
+estm4$t <- 1:length(estm4$mu)
+plot3<- ggplot(estm4, aes(x=t,y=mu))+
+     geom_vline(xintercept = 11,color="dodgerblue4",alpha=0.6,size=0.9)+
+  geom_hline(yintercept = 1,color="orange",alpha=1,linetype="dashed",size=0.9)+
+    annotate(geom="text", x=20, y=2.5, label="kappa[1] == 1e^{-4}",color="orange",size=4)+
+    geom_line()+
+    geom_ribbon(aes(ymin=low,ymax=up),alpha=0.3,fill="steelblue")+ 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black"),axis.title.y=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank())+
+  xlab("Sequence of Experiments")+
+   ylab("Posterior")+
+ scale_x_continuous(limits = c(-0,30), expand = c(-0.04, 0))+
+  scale_y_continuous(limits = c(-2.3,4.5))
+```
+
+```{r}
+#pdf("sensAn_synExm.pdf",9,3)
+gridExtra::grid.arrange(plot1,plot2,plot3,nrow=1)
+```
+
+
+
+### Meta-Analysis Weights
+
+```{r}
+sim <- create_data_cor(n,50)
+sim
+```
+
+
+```{r}
+set.seed(12345)
+n <- 30
+sim <- create_data_cor(n,50)
+
+meta_sim <- sim %>% group_by(lab_no) %>% summarize(es = mean(y),var = var(y))
+meta_sim
+rma_re <- metafor::rma(meta_sim$es,meta_sim$var,method="REML")
+rma_fe <- metafor::rma(meta_sim$es,meta_sim$var,method="FE")
+
+weights(ma)
+seq_fewe <- NULL
+seq_rewe <- NULL
+
+for(i in 1:n){
+meta_sim <- sim %>%filter(lab_no<=i)%>% group_by(lab_no) %>% summarize(es = mean(y),var = var(y))
+
+mafe <- metafor::rma(meta_sim$es,meta_sim$var,method="FE")
+mare <- metafor::rma(meta_sim$es,meta_sim$var,method="REML")
+
+#wefe<- 1 / (meta_sim$var[i]) #weights(mafe)[i]
+#were<- 1 / (mare$tau2 + meta_sim$var[i]) #weights(mare)[i]
+
+wefe<- weights(mafe)[i] 
+were<- weights(mare)[i]
+seq_fewe <- c(seq_fewe,wefe)
+seq_rewe <- c(seq_rewe,were)
+
+}
+seqwe <- data.frame(seq=1:n,fe_seq = seq_fewe, re_seq = seq_rewe)
+#pdf("Weights_seq.pdf",5,4)
+ggplot(seqwe) +
+  geom_point(aes(x=seq,y=fe_seq),color="dodgerblue4")+
+  geom_point(aes(x=seq,y=re_seq),color="dodgerblue1")+
+  geom_hline(yintercept = 1/n*100)+
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black"))+
+  xlab("Sequence of Experiments")+
+  ylab("Meta-Analysis Weight")+
+  annotate(geom="text", x=10, y=30, label=latex2exp::TeX("Fixed-Effect Weight"),color="dodgerblue4")+
+  annotate(geom="text", x=15, y=17, label=latex2exp::TeX("Random-Effects Weight"),color="dodgerblue1")
+
+```
+```{r}
+seqwe <- as.data.frame(seqwe)
+seqwe <- cbind(seqwe,retro_fe = weights(rma_fe), retro_re = weights(rma_re))
+
+```
+
+
+```{r}
+# install.packages("knitr")
+library(knitr)
+seqwe <- lapply(seqwe, function(x) if (is.numeric(x)) round(x, digits = 1) else x)
+seqwe <- as.data.frame(seqwe)
+cat(
+  kable(seqwe,
+        format     = "latex",
+        booktabs   = TRUE,
+        caption    = "My Table Caption",
+        label      = "tab:mytable",
+        align      = "ccc",      # center all three columns
+        row.names  = FALSE)
+)
+
+```
+
+
+### Card and Krueger
+
+
+```{r}
+### Papers from Neumark & Shirley, 2022. Standard Errors and values taken from original papers. For Card 1992a (missing currently) and C&K 1994 elasticity had to be calculated. 
+### For C&K 1994 (similar to footnote 21), we use table 3 column (iii) row 3. to calculate the elasticity
+### For Card, 1992b we select the elasticity estimate with change in overall Emp-Pop ratio as control (-0.06,0.24)
+### For Neumark & Wascher, we select the elasticity reported for teens (with enrollment controls) (-0.19,0.07)
+### For Williams, we aggregate the different estimates using a common study random effect 
+
+est <- c(0.496,-0.06,1.73,-0.19,-0.6822,-0.2926,-0.1202,-0.0811,-0.2706,-0.4674,-0.2080,0.0723,-0.11,0.73) 
+se <- c(0.2,0.24,0.934,0.07,0.0835,0.0758,0.0907,0.0603,0.0773,0.0605,0.1367,0.0600,0.0634,0.3)  
+data <- data.frame(y=est,se=se)
+data$t <- 1:14
+data$method <-c(1,2,2,3,rep(2,9),4)
+data$studyno <-c(1,2,3,4,rep(5,9),6)
+
+data <- fastDummies::dummy_cols(
+  data,
+  select_columns = "method",
+  remove_first_dummy = FALSE,  # keep all m dummies
+  remove_selected_columns = FALSE
+)
+### Create Prior
+kappa <- c(rep(0.3,3),0.05)
+
+
+prior <- matrix(kappa, nrow = 14, ncol = length(kappa), byrow = TRUE)
+prior_mu <- c(-0.15,sqrt(0.07**2+0.3**2)) ## 0,3
+
+
+collective_posterior<-get_collective_posterior_multiEstimate_sequence(data,prior,prior_mu)
+
+ 
+
+
+
+```
+```{r}
+collective_posterior_mod <- collective_posterior %>% filter(seq < 5 | seq >=13)
+```
+
+```{r}
+unique(collective_posterior_mod$seq)
+collective_posterior_mod$seq[collective_posterior_mod$seq==13] <- 5
+collective_posterior_mod$seq[collective_posterior_mod$seq==14] <- 6
+unique(collective_posterior_mod$seq)
+
+```
+
+```{r}
+W2_seq <- calculate_W2_sequence(collective_posterior_mod,prior_mu)
+
+```
+```{r}
+estm_seq <- calculate_posterior_estimates(collective_posterior_mod)
+```
+```{r}
+
+estm_seq <- add_row(estm_seq,mu=prior_mu[1],low=prior_mu[1]-1.96*prior_mu[2],up=prior_mu[1]+1.96*prior_mu[2],.before=1)
+```
+
+
+```{r}
+plot_data_MW <- function(data) {
+  ### creates a data plot
+  ggplot(data) +
+ geom_point(aes(x=t,y=y,color=as.factor(studyno)))+
+  geom_errorbar(aes(x=t,ymin=y-1.96*se,ymax=y+1.96*se,color=as.factor(studyno)),width=0)+  
+      scale_color_manual(values=c("black","black","black","black","dodgerblue4","darkorange"))+
+    theme(
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.background = element_blank(),
+      axis.line = element_line(colour = "black"),legend.position = "none"
+    ) +
+    xlab("Sequence of Estimates") +
+    ylab("Study Outcome y")+
+      annotate(geom="text", x=10, y=1.3, label="Card and Krueger (1994)",color="darkorange")
+}
+```
+```{r}
+plot_estimate_seq_MW <- function(estm_seq) {
+  ### creates a plot of the posterior and its uncertainty band
+  estm <- estm_seq
+  estm$t <- (1:length(estm$mu))-1
+  ggplot(estm, aes(x = t, y = mu)) +
+    geom_line() +
+    geom_ribbon(aes(ymin = low, ymax = up),
+                alpha = 0.3,
+                fill = "steelblue") +
+    theme(
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.background = element_blank(),
+      axis.line = element_line(colour = "black")
+    ) +
+    xlab("Sequence of Studies") +
+    ylab("Posterior")+  scale_x_continuous()+
+ scale_x_continuous(breaks = 0:6,
+  labels = c("Prior", as.character(1:6)),expand = c(0, 0))
+}
+```
+
+
+
+```{r}
+plot_W2_seq_MW <- function(W2_seq){
+  ggplot(W2_seq%>%filter(seq>0))+
+  geom_line(aes(x=seq,y=w2),data = W2_seq%>%filter(seq<6))+
+    geom_line(aes(x=seq,y=w2),data = W2_seq%>%filter(seq>4 & seq<7),color="darkorange")+
+  geom_point(aes(x=seq,y=w2,color=as.factor(seq)))  +
+  scale_color_manual(values=c("black","black","black","black","black","darkorange"))+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black"),legend.position = "none")+
+ #geom_vline(xintercept = 11,color="dodgerblue4")+
+  xlab("Sequence of Studies")+
+   ylab("Sequential \n Research Contribution")
+}
+```
+
+
+
+```{r}
+#pdf("MW_plot.pdf",9,3)
+
+ plot1 <- plot_data_MW(data)
+plot2 <- plot_estimate_seq_MW(estm_seq)
+plot3 <- plot_W2_seq_MW(W2_seq)
+plot <- gridExtra::grid.arrange(plot1, plot2, plot3, nrow = 1)
+```
+
+### meta-analysis for MW literature
+```{r}
+res_5 <- metafor::rma(y, se**2, data=data %>% filter(studyno==5),method="REML")
+
+ma <- data  %>% select(y,se,studyno) %>% filter(studyno!=5)
+ma <- ma %>% add_row(y = -0.2385, se = 0.0766 , studyno = 5)
+ma <- arrange(ma,(studyno))
+ma
+res <- metafor::rma(y, se**2, data=ma,method="REML")
+weights(res)
+1/(ma$se)**2/sum(1/(ma$se)**2)
+```
+
+
+### sensitivity analysis
+
+
+
+```{r,warning=FALSE,message=FALSE}
+kappa_sens <- c(5e-2,1e-1,1.5e-1,2e-1,2.5e-1,3e-1)
+sens <- NULL
+
+for(k in kappa_sens){
+  kappa <- c(rep(0.3,3),k)
+
+  prior <- matrix(kappa, nrow = 14, ncol = length(kappa), byrow = TRUE)
+prior_mu <- c(-0.15,sqrt(0.07**2+0.3**2)) ## 0,3
+
+
+collective_posterior<-get_collective_posterior_multiEstimate_sequence(data,prior,prior_mu)
+W2_seq <- calculate_W2_sequence(collective_posterior)
+sens <- rbind(sens, data.frame(kappa=k,w2 = tail(W2_seq,1)))
+}
+
+
+```
+
+
+
+
+
+```{r}
+#pdf("sensanalysis_MW.pdf",5,4)
+ggplot(sens,aes(x=kappa,y=w2.w2))+
+   geom_point()+
+  geom_line()+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black"),legend.position="none")+
+   xlab(latex2exp::TeX("Sensitivity Parameter $\\kappa_{CK}$"))+
+   ylab("Sequential \n Research Contribution") 
+
+```
+
+
+
+
+

@@ -14,7 +14,7 @@ set.seed(12345)
 
 ```{r,warning=FALSE,message=FALSE}
 
-smat <- function(data, prior) {
+SMART <- function(data, prior) {
   ### INPUT:
   ### data: (data.frame)
   ### data$y: study outcomes, data$se: study standard errors
@@ -44,7 +44,7 @@ get_collective_posterior_sequence <- function(data, prior) {
   ### run STAN model of the labelled Random Effect model to 
   ### and return the sequence of collective posteriors
   collective_posterior <- NULL
-  LRE <- cmdstan_model("SMAT.stan")
+  LRE <- cmdstan_model("SMART.stan")
   
   num_methods <- length(levels(as.factor(data$method)))
   seq_length <- length(levels(as.factor(data$t)))
@@ -178,7 +178,7 @@ plot_estimate_seq <- function(estm_seq) {
 
 ### Many Labs
 ```{r,warning=FALSE,message=FALSE}
-many_labs <- read.csv("data/many_labs_smat_dataset.csv")
+many_labs <- read.csv("data/many_labs_dataset.csv")
 ### get data into the right shape
 data <-
   many_labs %>% group_by(referrer) %>% summarize(y = ate[1], se = se[1])
@@ -186,8 +186,8 @@ data$t <- 1:length(data$referrer)
 data$method <- 1
 ### create prior matrix
 prior <- matrix(rep(1e-4, length(data$t)))
-### run SMAT
-plot <- smat(data, prior)
+### run SMART
+plot <- SMART(data, prior)
 ### plot the Trace
 gridExtra::grid.arrange(plot)
 ```
@@ -242,7 +242,7 @@ matrix(c(kappa, s), nrow = 10, ncol = 2, byrow = TRUE),
 matrix(c(kappa,     s), nrow = 20, ncol = 2, byrow = TRUE))
 
 ### run SMAT
-plot <- smat(data, prior)
+plot <- SMART(data, prior)
 ### plot the Trace
 gridExtra::grid.arrange(plot)
 ```
@@ -256,7 +256,7 @@ prior <- rbind(
   matrix(c(kappa,     s), nrow = 20, ncol = 2, byrow = TRUE)
 )
 ### run SMAT
-plot <- smat(data, prior)
+plot <- SMART(data, prior)
 ### plot the Trace
 gridExtra::grid.arrange(plot)
 ```
