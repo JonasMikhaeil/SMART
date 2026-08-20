@@ -3,6 +3,16 @@ This repository contains the R code illustrating the Sequential Meta-Analysis Re
 
 The code is organized in the following way:
 
-1) Practical Implementation (Vignette.rmd): A guided walkthrough featuring simple examples of how to apply SMART to standard meta-analysis datasets.
+1) Practical Implementation (`Vignette.Rmd`): A guided walkthrough featuring simple examples of how to apply SMART to standard meta-analysis datasets.
 
-2) Reproducibility (Figures.rmd): The exact scripts needed to recreate every figure found in the original paper.
+2) Reproducibility (`Figures.Rmd`): The exact scripts needed to recreate every figure found in the original paper.
+
+## Installation
+
+Install the required R packages, then install CmdStan:
+
+```r
+install.packages(c("tidyverse", "fastDummies", "posterior", "transport", "rstanarm", "gridExtra", "metafor", "knitr", "latex2exp", "rmarkdown"))
+install.packages("cmdstanr", repos = c("https://stan-dev.r-universe.dev", getOption("repos")))
+cmdstanr::install_cmdstan()
+```

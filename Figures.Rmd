@@ -18,9 +18,9 @@ options(mc.cores = parallel::detectCores())
 
 ```{r,warning=FALSE,message=FALSE}
 
-get_collective_posterior_sequence <- function(data,prior_kappa,prior_mu){
+get_collective_posterior_sequence <- function(data, prior_kappa) {
   collective_posterior <- NULL
-  LRE <- cmdstan_model("SMART.stan")
+  LRE <- cmdstan_model("non_centered_SMART.Stan")
 
   num_methods <- length(levels(as.factor(data$method)))
   seq_length <- length(levels(as.factor(data$t)))
@@ -29,20 +29,24 @@ data_i <- data %>%filter(t<=i)
 X <- data_i %>%
   select(tail(everything(), num_methods))
 fit_LRE <- LRE$sample(
-#data = list(N=length(data_i$y),m=num_methods,y=data_i$y,sigma_hat=data_i$se,label=X,sig_m=prior_kappa[i,],prior_mu = prior_mu[1],prior_sd = prior_mu[2]),
- data = list(
-        N = length(data_i$y),
-        m = num_methods,
-        y = data_i$y,
-        sigma_hat = data_i$se,
-        label = X,
-        sig_m = prior[i, ]
-      ),
-seed = 123,
-chains = 4,
-parallel_chains = 4,
-refresh = 0,iter_sampling = 10000,show_messages  = FALSE,
- show_exceptions= FALSE)
+  data = list(
+    N = length(data_i$y),
+    m = num_methods,
+    y = data_i$y,
+    sigma_hat = data_i$se,
+    label = X,
+    sig_m = prior_kappa[i, ]
+  ),
+  seed = 123,
+  chains = 4,
+  parallel_chains = 4,
+  adapt_delta = 0.99,
+  max_treedepth = 15,
+  refresh = 0,
+  iter_sampling = 10000,
+  show_messages = FALSE,
+  show_exceptions = FALSE
+)
 
 draws_LRE <- fit_LRE$draws(
   variables = "mu",
@@ -57,7 +61,7 @@ get_collective_posterior_multiEstimate_sequence <- function(data,prior_kappa,pri
   ### Slightly modified version of SMART to account for studies that report multiple estimates
   ### This is useful for our minimum wage example.
  collective_posterior <- NULL
-LRE <- cmdstan_model("SMART_MW.stan")
+LRE <- cmdstan_model("non_centered_SMART_MW.stan")
 num_methods <- length(levels(as.factor(data$method)))
 num_studies <- max(data$studyno)
 
@@ -69,12 +73,28 @@ num_studies <- max(data_i$studyno)
 X <- data_i %>%
   select(tail(everything(), num_methods))
 fit_LRE <- LRE$sample(
-data = list(N=length(data_i$y),m=num_methods,y=data_i$y,m2=num_studies,sigma_hat=data_i$se,label=X,sig_m=prior_kappa[i,],prior_mu = prior_mu[1],prior_sd = prior_mu[2],study_no=data_i$studyno),
-seed = 123,
-chains = 4,
-parallel_chains = 4,
-refresh = 0,iter_sampling = 20000,show_messages  = FALSE,
-show_exceptions= FALSE)
+  data = list(
+    N = length(data_i$y),
+    m = num_methods,
+    y = data_i$y,
+    m2 = num_studies,
+    sigma_hat = data_i$se,
+    label = X,
+    sig_m = prior_kappa[i, ],
+    prior_mu = prior_mu[1],
+    prior_sd = prior_mu[2],
+    study_no = data_i$studyno
+  ),
+  seed = 123,
+  chains = 4,
+  parallel_chains = 4,
+  adapt_delta = 0.999,
+  max_treedepth = 15,
+  refresh = 0,
+  iter_sampling = 20000,
+  show_messages = FALSE,
+  show_exceptions = FALSE
+)
 
 draws_LRE <- fit_LRE$draws(
   variables = "mu",
@@ -121,10 +141,11 @@ calculate_posterior_estimates <- function(collective_posterior){
   data.frame(posterior_est_seq)
 }
 
-SMART <- function(data,prior){
+SMART <- function(data, prior_kappa) {
    ### data: y,se,t, method , X
- ### prior: matrix t,method 0 or 1 (kappa_{method,t})
-collective_posterior <- get_collective_posterior_sequence(data,prior)
+ ### prior_kappa: matrix t,method 0 or 1 (kappa_{method,t})
+collective_posterior <-
+  get_collective_posterior_sequence(data, prior_kappa)
 W2_seq <- calculate_W2_sequence(collective_posterior)
 estm_seq <- calculate_posterior_estimates(collective_posterior)
 W2_seq
@@ -252,11 +273,9 @@ gamma<- .1
 
 eps <- rnorm(n,0,0.1)
 
-#l <- rep(c(1+rnorm(n/3,0,0.1),-0.5+rnorm(2*n/3,0,0.1),-0.15+rnorm(2*n/6,0,0.1)),n_per_study)
-#l <- rep(c(rep(1,n/3),rep(-0.25,2*n/3)),n_per_study)
+
 l <- rep(c(rep(1,n/3),rep(0,2*n/3)),n_per_study)
 
-#l <- rnorm(n,0,3)
 z <- l*beta + rep(eps,n_per_study)
 
 y <- theta +z+rnorm(n*n_per_study,0,0.1)
@@ -282,10 +301,10 @@ sim <- data.frame(y = y ,lab_no = lab_no)
 ```
 
 ```{r}
-set.seed(12345)
 n <- 30
-sim <- create_data_cor(n,50)
-meta_sim <- sim %>% group_by(lab_no) %>% summarize(es = mean(y),var = var(y),method=method[1])
+sim <- create_data_cor(n,1)
+
+meta_sim <- sim %>% group_by(lab_no) %>% summarize(es = mean(y),var = 0.01,method=method[1])
 ```
 
 
@@ -456,34 +475,27 @@ gridExtra::grid.arrange(plot1,plot2,plot3,nrow=1)
 
 ### Meta-Analysis Weights
 
-```{r}
-sim <- create_data_cor(n,50)
-sim
-```
-
 
 ```{r}
-set.seed(12345)
-n <- 30
-sim <- create_data_cor(n,50)
+sim <- create_data_cor(n,1)
 
-meta_sim <- sim %>% group_by(lab_no) %>% summarize(es = mean(y),var = var(y))
-meta_sim
+meta_sim <- sim %>% group_by(lab_no) %>% summarize(es = mean(y),var = 0.01,method=method[1])
 rma_re <- metafor::rma(meta_sim$es,meta_sim$var,method="REML")
 rma_fe <- metafor::rma(meta_sim$es,meta_sim$var,method="FE")
 
-weights(ma)
 seq_fewe <- NULL
 seq_rewe <- NULL
 
 for(i in 1:n){
-meta_sim <- sim %>%filter(lab_no<=i)%>% group_by(lab_no) %>% summarize(es = mean(y),var = var(y))
+meta_sim <- sim %>%
+  filter(lab_no <= i) %>%
+  group_by(lab_no) %>%
+  summarize(es = mean(y), var = 0.01, .groups = "drop")
 
 mafe <- metafor::rma(meta_sim$es,meta_sim$var,method="FE")
 mare <- metafor::rma(meta_sim$es,meta_sim$var,method="REML")
 
-#wefe<- 1 / (meta_sim$var[i]) #weights(mafe)[i]
-#were<- 1 / (mare$tau2 + meta_sim$var[i]) #weights(mare)[i]
+
 
 wefe<- weights(mafe)[i] 
 were<- weights(mare)[i]
@@ -501,8 +513,20 @@ ggplot(seqwe) +
 panel.background = element_blank(), axis.line = element_line(colour = "black"))+
   xlab("Sequence of Experiments")+
   ylab("Meta-Analysis Weight")+
-  annotate(geom="text", x=10, y=30, label=latex2exp::TeX("Fixed-Effect Weight"),color="dodgerblue4")+
-  annotate(geom="text", x=15, y=17, label=latex2exp::TeX("Random-Effects Weight"),color="dodgerblue1")
+  annotate(
+  geom = "text",
+  x = 10,
+  y = 30,
+  label = "Fixed-Effect Weight",
+  color = "dodgerblue4"
+) +
+annotate(
+  geom = "text",
+  x = 15,
+  y = 17,
+  label = "Random-Effects Weight",
+  color = "dodgerblue1"
+)
 
 ```
 ```{r}
